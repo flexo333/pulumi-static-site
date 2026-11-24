@@ -9,6 +9,18 @@ import json
 import pulumi
 import pulumi_aws as aws
 
+# Origin id for the optional API origin (see `api_origin_domain`).
+API_ORIGIN_ID = "api"
+
+# AWS managed cache policy "CachingDisabled" (TTLs all 0, nothing in the cache key).
+# https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html
+CACHE_POLICY_CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+
+# AWS managed origin request policy "AllViewerExceptHostHeader": forwards all viewer
+# headers, cookies and query strings except `Host`.
+# https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html
+ORIGIN_REQUEST_POLICY_ALL_VIEWER_EXCEPT_HOST_HEADER = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+
 
 class StaticSite(pulumi.ComponentResource):
     """A complete static-site stack: ACM cert, S3, CloudFront, Route53."""
@@ -25,6 +37,8 @@ class StaticSite(pulumi.ComponentResource):
         zone_id: pulumi.Input[str],
         bucket_name: str,
         spa_mode: bool = False,
+        api_origin_domain: pulumi.Input[str] | None = None,
+        api_path_pattern: str = "/api/*",
         opts: pulumi.ResourceOptions | None = None,
     ):
         super().__init__("lukerohde:static-site:StaticSite", name, None, opts)
@@ -112,6 +126,12 @@ async function handler(event) {
         )
 
         # ── CloudFront Distribution ──────────────────────────────────────────────
+        # WARNING: with spa_mode=True, 403 and 404 are mapped to /index.html with a 200
+        # for the WHOLE distribution, including the API behavior below. CloudFront custom
+        # error responses cannot be scoped to one cache behavior, and CloudFront Functions
+        # on viewer-response do not fire for origin statuses >= 400, so it cannot be undone
+        # at the edge. An API served via `api_path_pattern` MUST NOT return 403 or 404;
+        # express "not found" another way (e.g. 200 with a `found: false` body).
         custom_error_responses = []
         if spa_mode:
             for error_code in [403, 404]:
@@ -124,6 +144,56 @@ async function handler(event) {
                     )
                 )
 
+        origins = [
+            aws.cloudfront.DistributionOriginArgs(
+                domain_name=bucket.bucket_regional_domain_name,
+                origin_id=f"s3-{bucket_name}",
+                origin_access_control_id=oac.id,
+            )
+        ]
+        # Left as an empty list (-> None below) unless an API origin is requested, so
+        # callers that don't opt in send exactly the same Distribution args as v0.2.0.
+        ordered_cache_behaviors = []
+        if api_origin_domain is not None:
+            origins.append(
+                aws.cloudfront.DistributionOriginArgs(
+                    domain_name=api_origin_domain,
+                    origin_id=API_ORIGIN_ID,
+                    custom_origin_config=aws.cloudfront.DistributionOriginCustomOriginConfigArgs(
+                        http_port=80,
+                        https_port=443,
+                        origin_protocol_policy="https-only",
+                        origin_ssl_protocols=["TLSv1.2"],
+                        origin_keepalive_timeout=60,
+                    ),
+                )
+            )
+            ordered_cache_behaviors.append(
+                aws.cloudfront.DistributionOrderedCacheBehaviorArgs(
+                    path_pattern=api_path_pattern,
+                    target_origin_id=API_ORIGIN_ID,
+                    viewer_protocol_policy="https-only",
+                    # Read-only methods on purpose: CloudFront caps the origin response
+                    # timeout at 30 s by default (60 s without a quota increase), and an
+                    # API write path may legitimately run for minutes. Write traffic must
+                    # go direct to its own origin, not through this distribution.
+                    allowed_methods=["GET", "HEAD", "OPTIONS"],
+                    cached_methods=["GET", "HEAD"],
+                    compress=True,
+                    cache_policy_id=CACHE_POLICY_CACHING_DISABLED,
+                    # AllViewerExceptHostHeader, NOT AllViewer: a Lambda function URL
+                    # origin rejects a forwarded viewer `Host` header.
+                    origin_request_policy_id=ORIGIN_REQUEST_POLICY_ALL_VIEWER_EXCEPT_HOST_HEADER,
+                    # No function_associations here: the index_rewrite function is
+                    # attached to default_cache_behavior only, so API paths are never
+                    # rewritten.
+                    #
+                    # NOTE: the path prefix is NOT stripped. The origin receives
+                    # `/api/...` exactly as the viewer sent it; the origin is expected
+                    # to ignore the path.
+                )
+            )
+
         distribution = aws.cloudfront.Distribution(
             f"{name}-cdn",
             enabled=True,
@@ -131,13 +201,7 @@ async function handler(event) {
             default_root_object="index.html",
             aliases=[domain],
             price_class="PriceClass_100",
-            origins=[
-                aws.cloudfront.DistributionOriginArgs(
-                    domain_name=bucket.bucket_regional_domain_name,
-                    origin_id=f"s3-{bucket_name}",
-                    origin_access_control_id=oac.id,
-                )
-            ],
+            origins=origins,
             default_cache_behavior=aws.cloudfront.DistributionDefaultCacheBehaviorArgs(
                 target_origin_id=f"s3-{bucket_name}",
                 viewer_protocol_policy="redirect-to-https",
@@ -160,6 +224,7 @@ async function handler(event) {
                     )
                 ],
             ),
+            ordered_cache_behaviors=ordered_cache_behaviors or None,
             custom_error_responses=custom_error_responses,
             restrictions=aws.cloudfront.DistributionRestrictionsArgs(
                 geo_restriction=aws.cloudfront.DistributionRestrictionsGeoRestrictionArgs(
