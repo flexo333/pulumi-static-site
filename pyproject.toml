@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pulumi-static-site"
-version = "0.2.0"
+version = "0.3.0"
 description = "Reusable Pulumi ComponentResource for S3 + CloudFront static sites on AWS"
 requires-python = ">=3.9"
 dependencies = [
