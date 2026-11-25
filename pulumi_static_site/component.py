@@ -3,6 +3,8 @@ Reusable Pulumi ComponentResource for S3 + CloudFront static sites on AWS.
 
 Creates: ACM cert (us-east-1), S3 bucket (private + OAC), CloudFront distribution,
 CloudFront Function (index.html rewrite), bucket policy, Route53 A + AAAA aliases.
+
+Requires pulumi-aws >= 7 (uses aws.s3.Bucket, which replaced BucketV2 in v7).
 """
 
 import json
@@ -11,6 +13,15 @@ import pulumi_aws as aws
 
 # Origin id for the optional API origin (see `api_origin_domain`).
 API_ORIGIN_ID = "api"
+
+# CloudFront price classes (which edge locations serve the site).
+# PriceClass_100: North America + Europe. PriceClass_200: adds Asia, Middle East,
+# Africa and Australia/Oceania. PriceClass_All: every edge.
+PRICE_CLASSES = ("PriceClass_100", "PriceClass_200", "PriceClass_All")
+
+# Type token the bucket had before v0.4.0. The alias lets existing stacks adopt the
+# same bucket under aws.s3.Bucket instead of replacing it.
+LEGACY_BUCKET_TYPE = "aws:s3/bucketV2:BucketV2"
 
 # AWS managed cache policy "CachingDisabled" (TTLs all 0, nothing in the cache key).
 # https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html
@@ -39,9 +50,18 @@ class StaticSite(pulumi.ComponentResource):
         spa_mode: bool = False,
         api_origin_domain: pulumi.Input[str] | None = None,
         api_path_pattern: str = "/api/*",
+        price_class: str = "PriceClass_100",
+        error_page_path: str | None = None,
         opts: pulumi.ResourceOptions | None = None,
     ):
         super().__init__("lukerohde:static-site:StaticSite", name, None, opts)
+
+        if price_class not in PRICE_CLASSES:
+            raise ValueError(f"price_class must be one of {PRICE_CLASSES}, got {price_class!r}")
+        if spa_mode and error_page_path:
+            raise ValueError("error_page_path cannot be combined with spa_mode (spa_mode already maps 403/404 to /index.html)")
+        if error_page_path is not None and not error_page_path.startswith("/"):
+            raise ValueError("error_page_path must be an absolute path such as '/404.html'")
 
         child_opts = pulumi.ResourceOptions(parent=self)
 
@@ -99,10 +119,15 @@ async function handler(event) {
         )
 
         # ── S3 Bucket (private — served only via CloudFront OAC) ─────────────────
-        bucket = aws.s3.BucketV2(
+        bucket = aws.s3.Bucket(
             f"{name}-bucket",
             bucket=bucket_name,
-            opts=child_opts,
+            # Stacks created before v0.4.0 have this bucket as aws.s3.BucketV2; the alias
+            # makes Pulumi adopt it in place rather than delete + recreate it.
+            opts=pulumi.ResourceOptions(
+                parent=self,
+                aliases=[pulumi.Alias(type_=LEGACY_BUCKET_TYPE)],
+            ),
         )
 
         aws.s3.BucketPublicAccessBlock(
@@ -133,6 +158,18 @@ async function handler(event) {
         # at the edge. An API served via `api_path_pattern` MUST NOT return 403 or 404;
         # express "not found" another way (e.g. 200 with a `found: false` body).
         custom_error_responses = []
+        if error_page_path:
+            # Static (non-SPA) sites: a private S3 origin answers a missing key with 403,
+            # so map both 403 and 404 to the site's own error page, served as a real 404.
+            for error_code in [403, 404]:
+                custom_error_responses.append(
+                    aws.cloudfront.DistributionCustomErrorResponseArgs(
+                        error_code=error_code,
+                        response_code=404,
+                        response_page_path=error_page_path,
+                        error_caching_min_ttl=60,
+                    )
+                )
         if spa_mode:
             for error_code in [403, 404]:
                 custom_error_responses.append(
@@ -200,7 +237,7 @@ async function handler(event) {
             is_ipv6_enabled=True,
             default_root_object="index.html",
             aliases=[domain],
-            price_class="PriceClass_100",
+            price_class=price_class,
             origins=origins,
             default_cache_behavior=aws.cloudfront.DistributionDefaultCacheBehaviorArgs(
                 target_origin_id=f"s3-{bucket_name}",

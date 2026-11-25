@@ -23,3 +23,6 @@ jobs:
 
       - name: Check import works
         run: python -c "from pulumi_static_site import StaticSite; print('OK')"
+
+      - name: Unit tests (Pulumi mocks)
+        run: pytest -q
