@@ -14,9 +14,11 @@ import pulumi_aws as aws
 # Origin id for the optional API origin (see `api_origin_domain`).
 API_ORIGIN_ID = "api"
 
-# CloudFront price classes (which edge locations serve the site).
-# PriceClass_100: North America + Europe. PriceClass_200: adds Asia, Middle East,
-# Africa and Australia/Oceania. PriceClass_All: every edge.
+# CloudFront price classes (which edge locations serve the site), per AWS's pricing table:
+# PriceClass_100: North America, Europe, Israel.
+# PriceClass_200: adds Asia (Japan, India, Singapore, Hong Kong, ...), the Middle East
+#                 and Africa. It does NOT include Australia/NZ or South America.
+# PriceClass_All: every edge, the only class that includes Australia and New Zealand.
 PRICE_CLASSES = ("PriceClass_100", "PriceClass_200", "PriceClass_All")
 
 # Type token the bucket had before v0.4.0. The alias lets existing stacks adopt the

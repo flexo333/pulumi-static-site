@@ -29,15 +29,17 @@ site = StaticSite(
     domain="docs.example.com",
     zone_id=zone_id,
     bucket_name="my-site-bucket",
-    price_class="PriceClass_200",    # default "PriceClass_100"
+    price_class="PriceClass_All",    # default "PriceClass_100"
     error_page_path="/404.html",     # default None
 )
 ```
 
 - `price_class` (default `"PriceClass_100"`): which CloudFront edges serve the site.
-  `PriceClass_100` covers North America and Europe. `PriceClass_200` adds Asia, the
-  Middle East, Africa and Australia/Oceania. `PriceClass_All` covers every edge. Use
-  `PriceClass_200` or higher for an Australian audience.
+  `PriceClass_100` covers North America, Europe and Israel. `PriceClass_200` adds Asia,
+  the Middle East and Africa, but **not Australia/New Zealand or South America**.
+  `PriceClass_All` covers every edge, and it is **the only class that serves
+  Australia/NZ from local edges**. See the
+  [AWS price class table](https://aws.amazon.com/cloudfront/pricing/).
 - `error_page_path` (default `None`): for non-SPA sites, serve this page (as a real 404)
   when a path doesn't exist. A private S3 origin answers missing keys with 403, so both
   403 and 404 are mapped. It can't be combined with `spa_mode`.
